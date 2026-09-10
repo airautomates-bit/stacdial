@@ -1,0 +1,2 @@
+import {json,readSettings,readProducts,db,claimToken} from "@/lib/server";
+export async function GET(req:Request){try{const settings=await readSettings();const c=await db().prepare("SELECT token FROM claims WHERE token=? AND used=0").bind(claimToken(req)).first();const {sheetsId,...publicSettings}=settings;return json({settings:publicSettings,products:await readProducts(),hasCatalogue:!!(await db().prepare("SELECT id FROM products LIMIT 1").first()),claimed:!!c})}catch(e){console.error(e);return json({error:"Catalogue temporarily unavailable"},503)}}

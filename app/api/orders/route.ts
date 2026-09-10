@@ -1,0 +1,26 @@
+import {db,json,body,originCheck,limit,readSettings,claimToken} from "@/lib/server";
+import {getChatGPTUser} from "@/app/chatgpt-auth";
+import {syncOrders} from "@/lib/sheets";
+function response(o:any,whatsapp:string){const message="Hello Stacdial, I would like to purchase "+o.product_name+". Request: "+o.id+". Total: LKR "+(o.total/100).toLocaleString("en-LK")+". Name: "+o.name+". Please confirm availability and payment details.";return json({id:o.id,total:o.total/100,whatsappUrl:"https://wa.me/"+whatsapp+"?text="+encodeURIComponent(message)})}
+export async function POST(req:Request){try{originCheck(req);await limit(req,"orders",10);const b=await body(req);const name=String(b.name||"").trim(),phone=String(b.phone||"").replace(/[^0-9]/g,"").replace(/^00/,"").replace(/^0(?=[0-9]{9}$)/,"94"),note=String(b.note||"").trim();if(name.length<2||name.length>100||phone.length<9||phone.length>15||note.length>1000||!/^[a-zA-Z0-9-]{20,60}$/.test(b.requestKey||""))return json({error:"Please check your name and WhatsApp number"},400);const settings=await readSettings();if(!/^[1-9][0-9]{8,14}$/.test(settings.whatsapp))return json({error:"Purchase requests are not open yet"},503);const existing=await db().prepare("SELECT * FROM orders WHERE request_key=?").bind(b.requestKey).first();if(existing){if(existing.phone!==phone||existing.name!==name)return json({error:"Invalid request"},400);return response(existing,settings.whatsapp)}
+const row=await db().prepare("SELECT data FROM products WHERE id=? AND active=1").bind(String(b.productId)).first();if(!row)return json({error:"This watch is unavailable"},404);const p=JSON.parse(row.data);const subtotal=Math.round(p.price*100);if(p.demo||subtotal<=0)return json({error:"This watch is not available for purchase"},400);
+const offerCode=String(b.offerCode||"").trim().toUpperCase();
+if(offerCode){
+if(!/^STAC-[A-Z0-9]{16}$/.test(offerCode))return json({error:"Please check your personal offer code."},400);
+const offer=await db().prepare("SELECT * FROM loyalty_offers WHERE code=? AND phone=? AND active=1 AND used_order IS NULL AND expires>? AND minimum<=?").bind(offerCode,phone,Date.now(),subtotal).first();
+if(!offer)return json({error:"This offer is unavailable for this number or purchase amount, expired, or already used."},400);
+const id="SD-"+crypto.randomUUID().slice(0,8).toUpperCase(),u=await getChatGPTUser(),now=Date.now(),discount=Math.round(subtotal*offer.percent/100);
+const result=await db().batch([
+db().prepare("INSERT INTO orders (id,request_key,user_id,name,phone,note,product_id,product_name,subtotal,discount,total,status,created,updated,synced) SELECT ?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,0 FROM loyalty_offers WHERE code=? AND phone=? AND active=1 AND used_order IS NULL AND expires>? AND minimum<=? AND percent=?").bind(id,b.requestKey,u?.userId||null,name,phone,note,p.id,p.name,subtotal,discount,subtotal-discount,now,now,offerCode,phone,now,subtotal,offer.percent),
+db().prepare("UPDATE loyalty_offers SET used_order=? WHERE code=? AND used_order IS NULL AND EXISTS(SELECT 1 FROM orders WHERE id=?)").bind(id,offerCode,id)]);
+if(!result[0].meta.changes)return json({error:"This offer is no longer available. Please try again without it."},409);
+const o=await db().prepare("SELECT * FROM orders WHERE id=?").bind(id).first();try{await syncOrders()}catch(e){console.error("Sheet sync pending",e)}return response(o,settings.whatsapp);
+}
+const id="SD-"+crypto.randomUUID().slice(0,8).toUpperCase(),u=await getChatGPTUser(),now=Date.now(),token=claimToken(req),percent=settings.offerEnabled?settings.offerPercent:0;
+const discount=Math.round(subtotal*percent/100);
+// First-purchase eligibility and claim consumption execute in one serialized transaction.
+const result=await db().batch([
+db().prepare("INSERT INTO orders (id,request_key,user_id,name,phone,note,product_id,product_name,subtotal,discount,total,status,created,updated,synced) SELECT ?,?,?,?,?,?,?,?,?, CASE WHEN EXISTS(SELECT 1 FROM claims WHERE token=? AND used=0) AND NOT EXISTS(SELECT 1 FROM orders WHERE phone=?) THEN ? ELSE 0 END, ? - CASE WHEN EXISTS(SELECT 1 FROM claims WHERE token=? AND used=0) AND NOT EXISTS(SELECT 1 FROM orders WHERE phone=?) THEN ? ELSE 0 END,'requested',?,?,0").bind(id,b.requestKey,u?.userId||null,name,phone,note,p.id,p.name,subtotal,token,phone,discount,subtotal,token,phone,discount,now,now),
+db().prepare("UPDATE claims SET used=1 WHERE token=? AND EXISTS(SELECT 1 FROM orders WHERE id=? AND discount>0)").bind(token,id)]);
+const o=await db().prepare("SELECT * FROM orders WHERE id=?").bind(id).first();try{await syncOrders()}catch(e){console.error("Sheet sync pending",e)}return response(o,settings.whatsapp)}catch(e:any){console.error(e);return json({error:e.message==="Invalid request origin"?e.message:"Unable to save your request. Please check your details and try again."},400)}}
+export async function GET(){try{const u=await getChatGPTUser();if(!u)return json({error:"Sign in required"},401);const r=await db().prepare("SELECT id,product_name,total,status,created FROM orders WHERE user_id=? ORDER BY created DESC LIMIT 100").bind(u.userId).all();return json(r.results)}catch{return json({error:"Requests unavailable"},503)}}
