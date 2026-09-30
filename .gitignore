@@ -42,5 +42,7 @@ next-env.d.ts
 /.sites-runtime/
 /.agents/
 /.codex/
+/.npm-cache/
+/.firebase-cli-config/
 /outputs/
 /work/

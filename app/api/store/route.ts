@@ -1,2 +1,14 @@
-import {json,readSettings,readProducts,db,claimToken} from "@/lib/server";
-export async function GET(req:Request){try{const settings=await readSettings();const c=await db().prepare("SELECT token FROM claims WHERE token=? AND used=0").bind(claimToken(req)).first();const {sheetsId,...publicSettings}=settings;return json({settings:publicSettings,products:await readProducts(),hasCatalogue:!!(await db().prepare("SELECT id FROM products LIMIT 1").first()),claimed:!!c})}catch(e){console.error(e);return json({error:"Catalogue temporarily unavailable"},503)}}
+import { claimToken, errorResponse, json, readProducts, readSettings } from "@/lib/server";
+import {readCollectionDoc} from "@/lib/firestore-store";
+
+export async function GET(req: Request) {
+  try {
+    const settings = await readSettings();
+    const claim = await readCollectionDoc<{used:boolean}>("claims",claimToken(req));
+    const { sheetsId: _privateSheetsId, ...publicSettings } = settings;
+    const products = await readProducts();
+    return json({ settings: publicSettings, products, hasCatalogue: products.length > 0, claimed: Boolean(claim&&!claim.used) });
+  } catch (error) {
+    return errorResponse(error, "Catalogue temporarily unavailable");
+  }
+}

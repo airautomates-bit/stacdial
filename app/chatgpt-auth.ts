@@ -1,34 +1,42 @@
-import { headers, cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { adminEmails, runtime, usesTrustedPlatformIdentity } from "@/lib/runtime";
+import { firebaseAdminAuth, firebaseServerConfigured } from "@/lib/firebase-admin";
 
-export type ChatGPTUser = {
+export type CustomerUser = {
   userId: string;
   displayName: string;
   email: string;
   fullName: string | null;
 };
 
+export type AdminPrincipal = {
+  userId: string;
+  email: string;
+  source: "admin-session" | "sites-identity" | "firebase";
+};
+
 const USER_ID_HEADER = "oai-authenticated-user-id";
 const USER_EMAIL_HEADER = "oai-authenticated-user-email";
 const USER_FULL_NAME_HEADER = "oai-authenticated-user-full-name";
-const USER_FULL_NAME_ENCODING_HEADER =
-  "oai-authenticated-user-full-name-encoding";
+const USER_FULL_NAME_ENCODING_HEADER = "oai-authenticated-user-full-name-encoding";
 const PERCENT_ENCODED_UTF8 = "percent-encoded-utf-8";
 const SIGN_IN_PATH = "/signin-with-chatgpt";
 const SIGN_OUT_PATH = "/signout-with-chatgpt";
 const CALLBACK_PATH = "/callback";
+const ADMIN_COOKIE = "stacdial_admin";
+const ADMIN_SESSION_SECONDS = 30 * 24 * 60 * 60;
+const CUSTOMER_COOKIE = "stacdial_customer";
 
-export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
-  const requestHeaders = await headers();
+export function platformUserFromHeaders(
+  requestHeaders: Pick<Headers, "get">,
+  trusted: boolean,
+): CustomerUser | null {
+  if (!trusted) return null;
+
   const userId = requestHeaders.get(USER_ID_HEADER);
   const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!userId || !email) {
-    const token = (await cookies()).get("stacdial_admin")?.value;
-    const secret = process.env.ADMIN_SESSION_SECRET;
-    const adminEmail = (process.env.ADMIN_EMAILS || "liqiudspike@gmail.com").split(",")[0].trim();
-    if (token && secret && await validAdminToken(token, secret)) return {userId: "vercel-admin", displayName: adminEmail, email: adminEmail, fullName: adminEmail};
-    return null;
-  }
+  if (!userId || !email) return null;
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
   const fullName =
@@ -45,58 +53,130 @@ export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   };
 }
 
-export async function createAdminToken(secret: string): Promise<string> {
-  const value = `${Date.now()}.${crypto.randomUUID()}`;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), {name:"HMAC",hash:"SHA-256"}, false, ["sign"]);
-  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
-  return `${value}.${Array.from(sig).map(b=>b.toString(16).padStart(2,"0")).join("")}`;
+export async function getChatGPTUser(): Promise<CustomerUser | null> {
+  if (firebaseServerConfigured()) {
+    const session=(await cookies()).get(CUSTOMER_COOKIE)?.value;
+    if(session){try{const user=await firebaseAdminAuth().verifySessionCookie(session,true);return {userId:user.uid,email:String(user.email||""),displayName:String(user.name||user.email||"Customer"),fullName:user.name?String(user.name):null}}catch{/* Invalid or revoked customer session. */}}
+  }
+  return platformUserFromHeaders(await headers(), usesTrustedPlatformIdentity());
 }
-async function validAdminToken(token:string, secret:string){
-  const parts=token.split(".");if(parts.length<3)return false;const issued=Number(parts[0]);if(!Number.isFinite(issued)||Date.now()-issued>8*60*60*1000)return false;
-  const expected=await createAdminTokenForValue(`${parts[0]}.${parts[1]}`,secret);return expected===parts.slice(0,2).join(".")+"."+parts[2];
-}
-async function createAdminTokenForValue(value:string,secret:string){const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);const sig=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(value)));return `${value}.${Array.from(sig).map(b=>b.toString(16).padStart(2,"0")).join("")}`}
 
-export async function requireChatGPTUser(
-  returnTo: string,
-): Promise<ChatGPTUser> {
+export function customerAuthAvailable(): boolean {
+  return firebaseServerConfigured() || usesTrustedPlatformIdentity();
+}
+
+export async function getAdminPrincipal(): Promise<AdminPrincipal | null> {
+  const env = runtime();
+  const allowed = adminEmails(env);
+  if (!allowed.length) return null;
+
+  const token = (await cookies()).get(ADMIN_COOKIE)?.value;
+  const secret = String(env.ADMIN_SESSION_SECRET ?? "");
+  if (token && secret && (await validAdminToken(token, secret))) {
+    return { userId: "admin-session", email: allowed[0], source: "admin-session" };
+  }
+
+  const firebaseUser=await getChatGPTUser();
+  if(firebaseUser&&allowed.includes(firebaseUser.email.toLowerCase()))return {userId:firebaseUser.userId,email:firebaseUser.email,source:"firebase"};
+
+  const user = platformUserFromHeaders(await headers(), usesTrustedPlatformIdentity(env));
+  if (!user || !allowed.includes(user.email.toLowerCase())) return null;
+  return { userId: user.userId, email: user.email, source: "sites-identity" };
+}
+
+export async function createAdminToken(secret: string, issuedAt = Date.now()): Promise<string> {
+  const value = `${issuedAt}.${crypto.randomUUID()}`;
+  return `${value}.${await sign(value, secret)}`;
+}
+
+export async function validAdminToken(
+  token: string,
+  secret: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+
+  const issuedAt = Number(parts[0]);
+  if (!Number.isFinite(issuedAt) || issuedAt > now + 60_000) return false;
+  if (now - issuedAt > ADMIN_SESSION_SECONDS * 1000) return false;
+
+  const value = `${parts[0]}.${parts[1]}`;
+  const signature = hexToBytes(parts[2]);
+  if (!signature) return false;
+
+  const key = await hmacKey(secret, ["verify"]);
+  return crypto.subtle.verify(
+    "HMAC",
+    key,
+    Uint8Array.from(signature),
+    new TextEncoder().encode(value),
+  );
+}
+
+export async function requireChatGPTUser(returnTo: string): Promise<CustomerUser> {
   const user = await getChatGPTUser();
   if (user) return user;
-
+  if (firebaseServerConfigured()) {
+    redirect(`/login?return_to=${encodeURIComponent(safeRelativeReturnPath(returnTo))}`);
+  }
+  if (!customerAuthAvailable()) redirect("/login");
   redirect(chatGPTSignInPath(returnTo));
 }
 
 export function chatGPTSignInPath(returnTo: string): string {
-  const safeReturnTo = safeRelativeReturnPath(returnTo);
-  return `${SIGN_IN_PATH}?return_to=${encodeURIComponent(safeReturnTo)}`;
+  return `${SIGN_IN_PATH}?return_to=${encodeURIComponent(safeRelativeReturnPath(returnTo))}`;
 }
 
 export function chatGPTSignOutPath(returnTo = "/"): string {
-  const safeReturnTo = safeRelativeReturnPath(returnTo);
-  return `${SIGN_OUT_PATH}?return_to=${encodeURIComponent(safeReturnTo)}`;
+  return `${SIGN_OUT_PATH}?return_to=${encodeURIComponent(safeRelativeReturnPath(returnTo))}`;
+}
+
+export function adminCookie(token: string): string {
+  return `${ADMIN_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ADMIN_SESSION_SECONDS}`;
+}
+
+export function clearAdminCookie(): string {
+  return `${ADMIN_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+}
+
+async function sign(value: string, secret: string): Promise<string> {
+  const key = await hmacKey(secret, ["sign"]);
+  const signature = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)),
+  );
+  return Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function hmacKey(secret: string, usages: KeyUsage[]): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    usages,
+  );
+}
+
+function hexToBytes(value: string): Uint8Array | null {
+  if (!/^[a-f0-9]{64}$/i.test(value)) return null;
+  return Uint8Array.from(value.match(/.{2}/g) ?? [], (byte) => Number.parseInt(byte, 16));
 }
 
 function safeRelativeReturnPath(value: string): string {
   if (!value.startsWith("/") || value.startsWith("//")) return "/";
 
-  let url: URL;
   try {
-    url = new URL(value, "https://app.local");
+    const url = new URL(value, "https://app.local");
+    if (url.origin !== "https://app.local" || isReservedAuthPath(url.pathname)) return "/";
+    return `${url.pathname}${url.search}${url.hash}`;
   } catch {
     return "/";
   }
-  if (url.origin !== "https://app.local") return "/";
-  if (isReservedAuthPath(url.pathname)) return "/";
-
-  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 function isReservedAuthPath(pathname: string): boolean {
-  return (
-    pathname === SIGN_IN_PATH ||
-    pathname === SIGN_OUT_PATH ||
-    pathname === CALLBACK_PATH
-  );
+  return [SIGN_IN_PATH, SIGN_OUT_PATH, CALLBACK_PATH].includes(pathname);
 }
 
 function safeDecodeURIComponent(value: string): string | null {

@@ -1,0 +1,18 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "orders",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "user_id", "order": "ASCENDING" },
+        { "fieldPath": "created", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    { "collectionGroup": "products", "fieldPath": "fullDescription", "indexes": [] },
+    { "collectionGroup": "products", "fieldPath": "specs", "indexes": [] },
+    { "collectionGroup": "orders", "fieldPath": "internal_notes", "indexes": [] },
+    { "collectionGroup": "orders", "fieldPath": "note", "indexes": [] }
+  ]
+}
