@@ -48,7 +48,7 @@ export default function SiteHeader({ products, active = "" }: { products: Produc
           const representative = products.find(product => product.collection === collection && product.images[0]);
           const scene = collectionScenes[collection];
           return <Link key={collection} href={`/shop?collection=${encodeURIComponent(collection)}`}>
-            {scene ? <img className="collection-lifestyle" src={scene} alt={`${collection} lifestyle scene`}/> : representative ? <img src={representative.images[0]} alt=""/> : <span className="mega-placeholder" aria-hidden="true">STACDIAL</span>}
+            {scene ? <img className="collection-lifestyle" src={scene} alt={`${collection} lifestyle scene`} loading="lazy" decoding="async"/> : representative ? <img src={representative.images[0]} alt="" loading="lazy" decoding="async"/> : <span className="mega-placeholder" aria-hidden="true">STACDIAL</span>}
             <span>{collection}</span>
           </Link>;
         })}</div>
@@ -63,7 +63,7 @@ export default function SiteHeader({ products, active = "" }: { products: Produc
         <form action="/shop" className="search-field"><Search size={22}/><input autoFocus name="q" aria-label="Search watches and collections" placeholder="Start typing…" value={term} onChange={event => setTerm(event.target.value)}/></form>
         <div aria-live="polite" className="search-count">{needle ? `${results.length} watches found` : "Explore the collections"}</div>
         <div className="search-keywords">{collections.map(collection => <Link className="filter-chip" key={collection} href={`/shop?collection=${encodeURIComponent(collection)}`}>{collection}<ArrowUpRight size={14}/></Link>)}</div>
-        <div className="search-results">{(needle ? results : products.filter(product => !product.demo)).slice(0, 6).map(product => <Link className="search-result" key={product.id} href={`/shop/${product.slug || product.id}`}>{product.images[0] && <img src={product.images[0]} alt=""/>}<span><strong>{product.name}</strong><small>{product.collection} · {money(product.price)}</small></span><ArrowUpRight size={18}/></Link>)}</div>
+        <div className="search-results">{(needle ? results : products.filter(product => !product.demo)).slice(0, 6).map(product => <Link className="search-result" key={product.id} href={`/shop/${product.slug || product.id}`}>{product.images[0] && <img src={product.images[0]} alt="" loading="lazy" decoding="async"/>}<span><strong>{product.name}</strong><small>{product.collection} · {money(product.price)}</small></span><ArrowUpRight size={18}/></Link>)}</div>
         {needle && !results.length && !collections.length && <p className="muted">No matches yet. Try a different name or collection.</p>}
         {needle && <Link className="textlink" href={`/shop?q=${encodeURIComponent(term)}`}>View all results</Link>}
       </DialogContent>

@@ -24,3 +24,4 @@ export default function RootLayout({
     </html>
   );
 }
+export const preferredRegion = "sin1";

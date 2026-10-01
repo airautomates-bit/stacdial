@@ -3,6 +3,7 @@ import { readProducts, readSettings } from "./server";
 import { cookies } from "next/headers";
 import {firebaseServerConfigured} from "./firebase-admin";
 import {readCollectionDoc} from "./firestore-store";
+import { unstable_cache } from "next/cache";
 
 export type StorefrontData = {
   products: Product[];
@@ -12,6 +13,18 @@ export type StorefrontData = {
   unavailable: boolean;
 };
 
+const cachedProducts = unstable_cache(
+  () => readProducts(),
+  ["public-products"],
+  { revalidate: 60, tags: ["public-products"] },
+);
+
+const cachedSettings = unstable_cache(
+  () => readSettings(),
+  ["public-settings"],
+  { revalidate: 60, tags: ["public-settings"] },
+);
+
 export async function storefrontData(): Promise<StorefrontData> {
   if (!firebaseServerConfigured()) {
     return { products: samples, settings: defaults, hasCatalogue: false, claimed: false, unavailable: false };
@@ -19,8 +32,8 @@ export async function storefrontData(): Promise<StorefrontData> {
   try {
     const token = (await cookies()).get("stacdial_claim")?.value ?? "";
     const [products, settings, claim] = await Promise.all([
-      readProducts(),
-      readSettings(),
+      cachedProducts(),
+      cachedSettings(),
       token ? readCollectionDoc<{used:boolean}>("claims",token) : null,
     ]);
     return {

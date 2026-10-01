@@ -2,8 +2,10 @@ import "server-only";
 
 import { applicationDefault, cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+import { initializeFirestore, type Firestore } from "firebase-admin/firestore";
 import { runtime } from "./runtime";
+
+let firestoreInstance: Firestore | undefined;
 
 function adminApp(): App {
   const existing = getApps()[0];
@@ -35,7 +37,10 @@ export function firebaseAdminAuth() {
 }
 
 export function firestore() {
-  return getFirestore(adminApp());
+  // Vercel functions are more reliable over Firestore's HTTP transport than
+  // a long-lived gRPC channel, especially during a cold start.
+  firestoreInstance ??= initializeFirestore(adminApp(), { preferRest: true });
+  return firestoreInstance;
 }
 
 export function firebaseServerConfigured(): boolean {
